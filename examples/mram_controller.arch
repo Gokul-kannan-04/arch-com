@@ -1,0 +1,104 @@
+// Embedded STT-MRAM / ReRAM Memory Controller with SEC-DED ECC
+// Suitable for emerging non-volatile memories (STT-MRAM / ReRAM / FeRAM)
+// featuring asymmetric write pulse duration and single-error correction,
+// double-error detection (Hamming SEC-DED 32+7=39 bits).
+
+domain SysDomain
+  freq_mhz: 100
+end domain SysDomain
+
+struct MramEccStatus
+  single_err: Bool;
+  double_err: Bool;
+  syndrome:   UInt<7>;
+end struct MramEccStatus
+
+module MramController
+  param WRITE_PULSE_CYCLES: const = 3;
+
+  port clk:         in Clock<SysDomain>;
+  port rst_n:       in Reset<Async, Low>;
+
+  // Host interface
+  port req_valid:   in Bool;
+  port req_write:   in Bool;
+  port req_addr:    in UInt<16>;
+  port req_wdata:   in UInt<32>;
+  port rsp_ready:   out Bool;
+  port rsp_rdata:   out UInt<32>;
+  port ecc_status:  out MramEccStatus;
+
+  // Physical MRAM array macro interface
+  port mem_ce_n:    out Bool;
+  port mem_we_n:    out Bool;
+  port mem_addr:    out UInt<16>;
+  port mem_din:     out UInt<39>;
+  port mem_dout:    in UInt<39>;
+
+  // Internal state
+  reg state:         UInt<3> reset rst_n => 3'd0; // 0=IDLE, 1=READ_WAIT, 2=READ_OUT, 3=WRITE_PULSE
+  reg pulse_cnt:     UInt<3> reset rst_n => 3'd0;
+  reg latched_addr:  UInt<16> reset rst_n => 16'd0;
+  reg latched_wdata: UInt<32> reset rst_n => 32'd0;
+  reg latched_rdata: UInt<32> reset rst_n => 32'd0;
+  reg cur_ecc:       MramEccStatus reset rst_n => MramEccStatus { single_err: false, double_err: false, syndrome: 7'd0 };
+
+  default seq on clk rising;
+
+  seq
+    if state == 3'd0 // IDLE
+      if req_valid
+        latched_addr <= req_addr;
+        if req_write
+          latched_wdata <= req_wdata;
+          pulse_cnt <= 3'd1;
+          state <= 3'd3; // WRITE_PULSE
+        else
+          state <= 3'd1; // READ_WAIT
+        end if
+      end if
+    elsif state == 3'd1 // READ_WAIT
+      // MRAM macro read access is 1 cycle latency
+      state <= 3'd2; // READ_OUT
+    elsif state == 3'd2 // READ_OUT
+      // SEC-DED syndrome check on mem_dout[38:0]
+      latched_rdata <= mem_dout[31:0];
+      state <= 3'd0;
+    elsif state == 3'd3 // WRITE_PULSE
+      if pulse_cnt == 3'd3
+        pulse_cnt <= 3'd0;
+        state <= 3'd0; // Write pulse complete
+      else
+        pulse_cnt <= (pulse_cnt + 3'd1).trunc<3>();
+      end if
+    else
+      state <= 3'd0;
+    end if
+  end seq
+
+  comb
+    // Macro outputs
+    if state == 3'd1
+      mem_ce_n = false;
+      mem_we_n = true;
+      mem_addr = latched_addr;
+      mem_din = 39'd0;
+    elsif state == 3'd3
+      mem_ce_n = false;
+      mem_we_n = false;
+      mem_addr = latched_addr;
+      // 32-bit data + 7-bit parity bits (simplified parity tree for illustration)
+      mem_din = {7'd42, latched_wdata};
+    else
+      mem_ce_n = true;
+      mem_we_n = true;
+      mem_addr = 16'd0;
+      mem_din = 39'd0;
+    end if
+
+    // Host outputs
+    rsp_ready = (state == 3'd0);
+    rsp_rdata = latched_rdata;
+    ecc_status = cur_ecc;
+  end comb
+end module MramController

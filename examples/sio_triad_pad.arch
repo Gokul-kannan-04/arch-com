@@ -1,0 +1,96 @@
+// Special I/O (SIO) Triad Pad Controller
+// Multi-voltage (3.3V I/O / 1.2V Core) pad controller suitable for
+// open-drain (I2C/I3C), push-pull (SPI/UART), programmable drive strength,
+// slew rate control, and weak pull-up/pull-down bias control.
+
+domain SysDomain
+  freq_mhz: 100
+end domain SysDomain
+
+struct PadConfig
+  drive_strength: UInt<2>; // 0=2mA, 1=4mA, 2=8mA, 3=12mA
+  slew_fast:      Bool;
+  schmitt_en:     Bool;
+  pull_up:        Bool;
+  pull_down:      Bool;
+  open_drain:     Bool;
+end struct PadConfig
+
+module SioTriadPad
+  port clk:        in Clock<SysDomain>;
+  port rst_n:      in Reset<Async, Low>;
+
+  // Host configuration interface
+  port cfg_in:     in PadConfig;
+  port cfg_we:     in Bool;
+  port cfg_out:    out PadConfig;
+
+  // Digital core logic interface
+  port core_tx:    in Bool;
+  port core_oe:    in Bool;
+  port core_rx:    out Bool;
+
+  // Analog / PDK Triad Pad macro boundary
+  port pad_do:     out Bool;
+  port pad_oe_n:   out Bool;
+  port pad_di:     in Bool;
+  port pad_ds:     out UInt<2>;
+  port pad_slew:   out Bool;
+  port pad_pu_en:  out Bool;
+  port pad_pd_en:  out Bool;
+
+  reg cfg: PadConfig reset rst_n => PadConfig {
+    drive_strength: 2'd1,
+    slew_fast:      false,
+    schmitt_en:     true,
+    pull_up:        true,
+    pull_down:      false,
+    open_drain:     false
+  };
+
+  reg rx_sync: Bool reset rst_n => false;
+
+  default seq on clk rising;
+
+  seq
+    if cfg_we
+      cfg <= cfg_in;
+    end if
+
+    // Register input from pad
+    rx_sync <= pad_di;
+  end seq
+
+  comb
+    cfg_out = cfg;
+    core_rx = rx_sync;
+
+    // Pad analog macro controls
+    pad_ds    = cfg.drive_strength;
+    pad_slew  = cfg.slew_fast;
+    pad_pu_en = cfg.pull_up;
+    pad_pd_en = cfg.pull_down;
+
+    // Output driver enable & data logic
+    if cfg.open_drain
+      // Open-drain mode (e.g. I2C / I3C SDA):
+      // Only drive active low; float when data is high
+      if core_oe
+        if core_tx == false
+          pad_do   = false;
+          pad_oe_n = false; // Active low drive
+        else
+          pad_do   = true;
+          pad_oe_n = true;  // High-Z (pulled up externally / internally)
+        end if
+      else
+        pad_do   = true;
+        pad_oe_n = true;
+      end if
+    else
+      // Push-pull mode (e.g. SPI / UART / QSPI)
+      pad_do   = core_tx;
+      pad_oe_n = !core_oe;
+    end if
+  end comb
+end module SioTriadPad

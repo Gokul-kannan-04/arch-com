@@ -1,0 +1,78 @@
+// IHP 130nm BiCMOS / SiGe (SG13G2) Standard Cell & PDK Macro Wrapper
+// Showcases hardware mapping for process-specific macros:
+// 1. Integrated Clock Gating (ICG) with scan test override
+// 2. High-speed Level Shifting (1.2V Core <-> 3.3V I/O)
+// 3. Power-domain Isolation (ISO cell) and Body-Bias well tap monitoring
+
+domain CoreDomain
+  freq_mhz: 200
+end domain CoreDomain
+
+domain IoDomain
+  freq_mhz: 50
+end domain IoDomain
+
+struct Sg13g2PowerStatus
+  iso_active:   Bool;
+  core_pwr_ok:  Bool;
+  io_pwr_ok:    Bool;
+  nwell_bias_v: UInt<8>;
+end struct Sg13g2PowerStatus
+
+module Sg13g2Stdcells
+  port clk_core:     in Clock<CoreDomain>;
+  port rst_core_n:   in Reset<Async, Low>;
+  port clk_io:       in Clock<IoDomain>;
+
+  // Clock gating control (ICG cell equivalent)
+  port clk_en:       in Bool;
+  port test_mode:    in Bool;
+  port gated_clk_en: out Bool;
+
+  // Power domain isolation control (sg13g2_isocel)
+  port pwr_iso_en:   in Bool;
+  port core_signal:  in UInt<8>;
+  port isolated_out: out UInt<8>;
+
+  // Level shifter status and monitor
+  port bias_adc_in:  in UInt<8>;
+  port pwr_status:   out Sg13g2PowerStatus;
+
+  reg status: Sg13g2PowerStatus reset rst_core_n => Sg13g2PowerStatus {
+    iso_active:   false,
+    core_pwr_ok:  true,
+    io_pwr_ok:    true,
+    nwell_bias_v: 8'd120
+  };
+
+  reg icg_latch: Bool reset rst_core_n => false;
+
+  default seq on clk_core rising;
+
+  seq
+    // ICG latch model: transparent when clock is low, latched when clock is high
+    icg_latch <= (clk_en | test_mode);
+
+    // Well bias and power monitor sample
+    status <= Sg13g2PowerStatus {
+      iso_active:   pwr_iso_en,
+      core_pwr_ok:  true,
+      io_pwr_ok:    true,
+      nwell_bias_v: bias_adc_in
+    };
+  end seq
+
+  comb
+    // Clock gating output enable
+    gated_clk_en = icg_latch | test_mode;
+
+    // Isolation cell logic: clamp to clamp-value (0) when isolation is active
+    if pwr_iso_en
+      isolated_out = 8'd0;
+    else
+      isolated_out = core_signal;
+    end if
+
+    pwr_status = status;
+  end comb
+end module Sg13g2Stdcells

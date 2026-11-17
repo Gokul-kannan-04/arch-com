@@ -1,0 +1,79 @@
+// Adaptive Body Biasing (ABB) Controller
+// Compatible with 130nm SiGe (SG13G2) and FD-SOI process nodes.
+// Dynamically adjusts well bias (Forward/Reverse Body Bias) based on
+// ring-oscillator gate delay tracking.
+
+domain SysDomain
+  freq_mhz: 100
+end domain SysDomain
+
+struct AbbConfig
+  enable:     UInt<1>;
+  mode_fbb:   UInt<1>;
+  target_cnt: UInt<16>;
+end struct AbbConfig
+
+module AbbController
+  port clk:        in Clock<SysDomain>;
+  port rst_n:      in Reset<Async, Low>;
+  port ro_pulse:   in Bool;
+  port cfg_data:   in UInt<18>;
+  port cfg_we:     in Bool;
+  
+  port bias_dac:   out UInt<8>;
+  port locked:     out Bool;
+
+  reg cfg: AbbConfig reset rst_n => AbbConfig { enable: 0, mode_fbb: 0, target_cnt: 16'd1000 };
+  reg cur_dac: UInt<8> reset rst_n => 8'd128;
+  reg ro_sample_cnt: UInt<16> reset rst_n => 0;
+  reg window_cnt: UInt<8> reset rst_n => 0;
+  reg is_locked: Bool reset rst_n => false;
+
+  default seq on clk rising;
+
+  seq
+    if cfg_we
+      cfg <= AbbConfig {
+        enable: cfg_data[0:0],
+        mode_fbb: cfg_data[1:1],
+        target_cnt: cfg_data[17:2]
+      };
+    end if
+
+    if cfg.enable == 1'd1
+      window_cnt <= (window_cnt + 8'd1).trunc<8>();
+      if ro_pulse
+        ro_sample_cnt <= (ro_sample_cnt + 16'd1).trunc<16>();
+      end if
+
+      if window_cnt == 8'd255
+        window_cnt <= 8'd0;
+        ro_sample_cnt <= 16'd0;
+
+        if ro_sample_cnt < cfg.target_cnt
+          if cur_dac < 8'd250
+            cur_dac <= (cur_dac + 8'd1).trunc<8>();
+          end if
+          is_locked <= false;
+        elsif ro_sample_cnt > cfg.target_cnt
+          if cur_dac > 8'd5
+            cur_dac <= (cur_dac - 8'd1).trunc<8>();
+          end if
+          is_locked <= false;
+        else
+          is_locked <= true;
+        end if
+      end if
+    else
+      cur_dac <= 8'd128;
+      is_locked <= false;
+      window_cnt <= 8'd0;
+      ro_sample_cnt <= 16'd0;
+    end if
+  end seq
+
+  comb
+    bias_dac = cur_dac;
+    locked = is_locked;
+  end comb
+end module AbbController
